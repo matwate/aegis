@@ -91,22 +91,12 @@ def encode(
     enc_tmp = Path(tmp_dir) / "manifest.enc"
     enc_local_path = encrypt_directive(str(manifest), str(public_key), str(enc_tmp))
 
-    # Build minimal metadata and sign
-    # Try to compute file_sha256 if manifest provides a file (best-effort parse)
-    file_sha256: Optional[str] = None
-    try:
-        model = parse_yaml_file_as(AutorunFile, str(manifest))
-        if model.autorun.provides_file and model.autorun.run.file:
-            file_path = Path(model.autorun.run.file)
-            if file_path.is_file():
-                file_sha256 = sha256_file(str(file_path))
-    except Exception:
-        pass
-
+    # Compute enc hash now; compute file hash on the USB after copy (if applicable)
     enc_hash = sha256_file(str(enc_local_path))
-    signing_msg = build_signing_message(enc_hash, file_sha256)
-    signature = rsa_sign_pss_sha256("private_key.pem", signing_msg)
     key_id = rsa_key_id_from_public_pem(public_key.read_bytes())
+
+    # Parse manifest to know if a USB file is expected
+    model = parse_yaml_file_as(AutorunFile, str(manifest))
 
     mount_point: Optional[str] = None
     try:
@@ -117,6 +107,19 @@ def encode(
             raise typer.Exit(code=1)
         target = Path(mount_point) / enc_name
         shutil.copy2(enc_local_path, target)
+
+        file_sha256: Optional[str] = None
+        if model.autorun.provides_file and model.autorun.run.file:
+            usb_file = Path(mount_point) / model.autorun.run.file
+            if not usb_file.is_file():
+                usb.unmount_device(mount_point)
+                typer.secho(f"Expected file not found on USB: {usb_file}", fg=typer.colors.RED)
+                raise typer.Exit(code=2)
+            file_sha256 = sha256_file(str(usb_file))
+
+        signing_msg = build_signing_message(enc_hash, file_sha256)
+        signature = rsa_sign_pss_sha256("private_key.pem", signing_msg)
+
         # Write metadata next to encrypted blob
         meta = {
             "version": 1,
@@ -195,8 +198,10 @@ def validate(
     try:
         decrypt_directive(str(enc_path), str(private_key), str(dec_path))
         model = parse_yaml_file_as(AutorunFile, str(dec_path))
-        # If metadata included a file hash and manifest provides a file, re-verify signature binding
-        if meta.get("file_sha256") and model.autorun.provides_file and model.autorun.run.file:
+        # If manifest requires provides_file, require file_sha256 in metadata and re-verify binding
+        if model.autorun.provides_file and model.autorun.run.file:
+            if not isinstance(meta.get("file_sha256"), str) or not meta.get("file_sha256"):
+                raise ValueError("Missing signed file_sha256 in metadata for provides_file manifest.")
             file_path = Path(mount_point) / model.autorun.run.file
             comp_hash = sha256_file(str(file_path)) if file_path.is_file() else None
             if not verify_metadata(str(enc_path), meta, str(public_key), comp_hash):
@@ -326,7 +331,7 @@ def daemon(
                 usb.unmount_device(mount_point)
                 continue
 
-            # Initially verify with just enc hash; file hash binding will be rechecked after decrypt
+            # Initially verify with just enc hash; will enforce file_hash if required after decrypt
             if not verify_metadata(str(enc_path), meta, str(public_key)):
                 usb.unmount_device(mount_point)
                 typer.secho(
@@ -341,8 +346,10 @@ def daemon(
                 decrypt_directive(str(enc_path), str(private_key), str(dec_path))
                 model = parse_yaml_file_as(AutorunFile, str(dec_path))
 
-                # If metadata included a file hash and manifest provides a file, re-verify signature binding
-                if meta.get("file_sha256") and model.autorun.provides_file and model.autorun.run.file:
+                # If manifest requires provides_file, require signed file hash and re-verify binding
+                if model.autorun.provides_file and model.autorun.run.file:
+                    if not isinstance(meta.get("file_sha256"), str) or not meta.get("file_sha256"):
+                        raise ValueError("Missing signed file_sha256 in metadata for provides_file manifest.")
                     file_path = Path(mount_point) / model.autorun.run.file
                     comp_hash = sha256_file(str(file_path)) if file_path.is_file() else None
                     if not verify_metadata(str(enc_path), meta, str(public_key), comp_hash):

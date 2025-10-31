@@ -20,13 +20,13 @@ def autorun(fileModel: AutorunFile, mountpoint: str, meta: Optional[Dict[str, An
         file_path = Path(f"{mountpoint}/{directive.run.file}")
         if not file_path.is_file():
             raise FileNotFoundError(f"File {file_path} not found.")
-        # Enforce file hash if provided in metadata
-        if meta and isinstance(meta, dict):
-            expected_hash = meta.get("file_sha256")
-            if expected_hash:
-                actual_hash = sha256_file(str(file_path))
-                if actual_hash != expected_hash:
-                    raise ValueError("USB file hash mismatch; refusing to execute.")
+        # Require signed file hash in metadata and enforce
+        if not meta or not isinstance(meta, dict) or not meta.get("file_sha256"):
+            raise ValueError("Missing signed file_sha256 in metadata; refusing to execute USB-provided file.")
+        expected_hash = meta.get("file_sha256")
+        actual_hash = sha256_file(str(file_path))
+        if actual_hash != expected_hash:
+            raise ValueError("USB file hash mismatch; refusing to execute.")
         _run_with_interpreter(directive.run.interpreter, file_path, directive.run.arguments)
     else:
         # Either the directive provides a command or the file is found in the host and not at the usb
