@@ -195,8 +195,8 @@ def validate(
     try:
         decrypt_directive(str(enc_path), str(private_key), str(dec_path))
         model = parse_yaml_file_as(AutorunFile, str(dec_path))
-        # If provides_file, recompute hash and re-verify signature binding
-        if model.autorun.provides_file and model.autorun.run.file:
+        # If metadata included a file hash and manifest provides a file, re-verify signature binding
+        if meta.get("file_sha256") and model.autorun.provides_file and model.autorun.run.file:
             file_path = Path(mount_point) / model.autorun.run.file
             comp_hash = sha256_file(str(file_path)) if file_path.is_file() else None
             if not verify_metadata(str(enc_path), meta, str(public_key), comp_hash):
@@ -341,8 +341,8 @@ def daemon(
                 decrypt_directive(str(enc_path), str(private_key), str(dec_path))
                 model = parse_yaml_file_as(AutorunFile, str(dec_path))
 
-                # If the manifest says the USB provides a file, recompute file hash and re-verify signature binding
-                if model.autorun.provides_file and model.autorun.run.file:
+                # If metadata included a file hash and manifest provides a file, re-verify signature binding
+                if meta.get("file_sha256") and model.autorun.provides_file and model.autorun.run.file:
                     file_path = Path(mount_point) / model.autorun.run.file
                     comp_hash = sha256_file(str(file_path)) if file_path.is_file() else None
                     if not verify_metadata(str(enc_path), meta, str(public_key), comp_hash):
