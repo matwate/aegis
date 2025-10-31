@@ -1,11 +1,16 @@
 import os
 import struct
+import base64
+import hashlib
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicKey, RSAPrivateKey
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from pathlib import Path
 from typing import Optional, Tuple
+
+import base64
+import hashlib
 
 
 def geneate_keypair(size: int = 4096) -> Tuple[RSAPrivateKey, RSAPublicKey]:
@@ -40,6 +45,82 @@ def geneate_keypair(size: int = 4096) -> Tuple[RSAPrivateKey, RSAPublicKey]:
             )
         )
     return private_key, public_key
+
+
+# -------- Utilities for simple sign/verify metadata --------
+
+def sha256_file(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def rsa_key_id_from_public_pem(pem_bytes: bytes) -> str:
+    pub = serialization.load_pem_public_key(pem_bytes)
+    if not isinstance(pub, RSAPublicKey):
+        raise TypeError("Public key must be RSA")
+    der = pub.public_bytes(
+        serialization.Encoding.DER,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    return hashlib.sha256(der).hexdigest()
+
+
+def rsa_sign_pss_sha256(private_key_path: str, message: bytes) -> str:
+    sk = serialization.load_pem_private_key(open(private_key_path, "rb").read(), password=None)
+    if not isinstance(sk, RSAPrivateKey):
+        raise TypeError("Private key must be RSA")
+    sig = sk.sign(
+        message,
+        padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=hashes.SHA256().digest_size),
+        hashes.SHA256(),
+    )
+    return base64.b64encode(sig).decode("ascii")
+
+
+def rsa_verify_pss_sha256(public_key_path: str, message: bytes, signature_b64: str) -> bool:
+    try:
+        pk = serialization.load_pem_public_key(open(public_key_path, "rb").read())
+        if not isinstance(pk, RSAPublicKey):
+            return False
+        sig = base64.b64decode(signature_b64)
+        pk.verify(
+            sig,
+            message,
+            padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=hashes.SHA256().digest_size),
+            hashes.SHA256(),
+        )
+        return True
+    except Exception:
+        return False
+
+
+def build_signing_message(enc_sha256: str, file_sha256: Optional[str]) -> bytes:
+    fs = file_sha256 or ""
+    msg = f"AEGISv1|enc_sha256={enc_sha256}|file_sha256={fs}"
+    return msg.encode("utf-8")
+
+
+def verify_metadata(enc_path: str, meta: dict, public_key_path: str, computed_file_sha256: Optional[str] = None) -> bool:
+    try:
+        if not isinstance(meta, dict):
+            return False
+        if int(meta.get("version", 0)) != 1:
+            return False
+        enc_hash = sha256_file(enc_path)
+        if meta.get("enc_sha256") != enc_hash:
+            return False
+        # Use computed file hash if provided; else fall back to meta
+        file_sha = computed_file_sha256 if computed_file_sha256 is not None else meta.get("file_sha256")
+        message = build_signing_message(enc_hash, file_sha)
+        sig_b64 = meta.get("sig_b64")
+        if not isinstance(sig_b64, str) or not sig_b64:
+            return False
+        return rsa_verify_pss_sha256(public_key_path, message, sig_b64)
+    except Exception:
+        return False
 
 
 def encrypt_directive(

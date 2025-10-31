@@ -7,7 +7,7 @@ from typing import Optional
 
 import typer
 
-from safety import geneate_keypair, encrypt_directive, decrypt_directive
+from safety import geneate_keypair, encrypt_directive, decrypt_directive, sha256_file, rsa_key_id_from_public_pem, rsa_sign_pss_sha256, rsa_verify_pss_sha256, build_signing_message, verify_metadata
 from model import AutorunFile
 from pydantic_yaml import parse_yaml_file_as
 
@@ -91,6 +91,23 @@ def encode(
     enc_tmp = Path(tmp_dir) / "manifest.enc"
     enc_local_path = encrypt_directive(str(manifest), str(public_key), str(enc_tmp))
 
+    # Build minimal metadata and sign
+    # Try to compute file_sha256 if manifest provides a file (best-effort parse)
+    file_sha256: Optional[str] = None
+    try:
+        model = parse_yaml_file_as(AutorunFile, str(manifest))
+        if model.autorun.provides_file and model.autorun.run.file:
+            file_path = Path(model.autorun.run.file)
+            if file_path.is_file():
+                file_sha256 = sha256_file(str(file_path))
+    except Exception:
+        pass
+
+    enc_hash = sha256_file(str(enc_local_path))
+    signing_msg = build_signing_message(enc_hash, file_sha256)
+    signature = rsa_sign_pss_sha256("private_key.pem", signing_msg)
+    key_id = rsa_key_id_from_public_pem(public_key.read_bytes())
+
     mount_point: Optional[str] = None
     try:
         typer.echo("Please plug in a USB drive... waiting to mount")
@@ -100,7 +117,16 @@ def encode(
             raise typer.Exit(code=1)
         target = Path(mount_point) / enc_name
         shutil.copy2(enc_local_path, target)
-        typer.secho(f"Encrypted file copied to {target}", fg=typer.colors.GREEN)
+        # Write metadata next to encrypted blob
+        meta = {
+            "version": 1,
+            "signer_key_id": key_id,
+            "enc_sha256": enc_hash,
+            "file_sha256": file_sha256,
+            "sig_b64": signature,
+        }
+        (Path(mount_point) / "aegis.meta.json").write_text(__import__("json").dumps(meta, indent=2))
+        typer.secho(f"Encrypted file copied to {target} (aegis.meta.json written)", fg=typer.colors.GREEN)
     finally:
         try:
             shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -112,11 +138,17 @@ def encode(
 
 @app.command()
 def validate(
+    public_key: Path = typer.Option(
+        Path(DEFAULT_PUBLIC_KEY),
+        exists=True,
+        readable=True,
+        help="Path to public key for signature verification",
+    ),
     private_key: Path = typer.Option(
         Path(DEFAULT_PRIVATE_KEY),
         exists=True,
         readable=True,
-        help="Path to private key for validation",
+        help="Path to private key for decryption",
     ),
     enc_name: str = typer.Option(
         DEFAULT_ENC_NAME, help="Encrypted filename to check on USB"
@@ -146,14 +178,31 @@ def validate(
         typer.secho(f"Encrypted file not found: {enc_path}", fg=typer.colors.RED)
         raise typer.Exit(code=2)
 
+    # Read and verify metadata (enc-only first)
+    meta_path = Path(mount_point) / "aegis.meta.json"
+    try:
+        meta = __import__("json").loads(meta_path.read_text()) if meta_path.is_file() else None
+    except Exception:
+        meta = None
+    if not meta or not verify_metadata(str(enc_path), meta, str(public_key)):
+        usb.unmount_device(mount_point)
+        typer.secho("Signature or metadata verification failed.", fg=typer.colors.RED)
+        raise typer.Exit(code=3)
+
     tmp_dir = tempfile.mkdtemp(prefix="aegis_")
     dec_path = Path(tmp_dir) / "manifest.dec.yaml"
 
     try:
         decrypt_directive(str(enc_path), str(private_key), str(dec_path))
-        parse_yaml_file_as(AutorunFile, str(dec_path))
+        model = parse_yaml_file_as(AutorunFile, str(dec_path))
+        # If provides_file, recompute hash and re-verify signature binding
+        if model.autorun.provides_file and model.autorun.run.file:
+            file_path = Path(mount_point) / model.autorun.run.file
+            comp_hash = sha256_file(str(file_path)) if file_path.is_file() else None
+            if not verify_metadata(str(enc_path), meta, str(public_key), comp_hash):
+                raise ValueError("Signature binding to file hash failed.")
         typer.secho(
-            "Validation successful: manifest decrypts and parses.",
+            "Validation successful: signature verified, manifest decrypts and parses.",
             fg=typer.colors.GREEN,
         )
     finally:
@@ -168,6 +217,12 @@ def validate(
 
 @app.command()
 def daemon(
+    public_key: Path = typer.Option(
+        Path(DEFAULT_PUBLIC_KEY),
+        exists=True,
+        readable=True,
+        help="Path to public key for signature verification",
+    ),
     private_key: Path = typer.Option(
         Path(DEFAULT_PRIVATE_KEY),
         exists=True,
@@ -251,16 +306,54 @@ def daemon(
                 usb.unmount_device(mount_point)
                 continue
 
+            # Verify metadata and signature before decrypting
+            meta_path = Path(mount_point) / "aegis.meta.json"
+            try:
+                meta = __import__("json").loads(meta_path.read_text()) if meta_path.is_file() else None
+            except Exception:
+                meta = None
+            # Compute file hash for signature binding when applicable
+            computed_file_sha = None
+            try:
+                # We don't have the manifest yet; infer path from common location
+                # The actual enforcement occurs in autorun(), but here we want signature check binding
+                # If provides_file is expected, the file will be under mount; but we only know after decrypt
+                pass
+            except Exception:
+                computed_file_sha = None
+
+            if not meta:
+                usb.unmount_device(mount_point)
+                continue
+
+            # Initially verify with just enc hash; file hash binding will be rechecked after decrypt
+            if not verify_metadata(str(enc_path), meta, str(public_key)):
+                usb.unmount_device(mount_point)
+                typer.secho(
+                    f"Skipping device at {mount_point}: signature/metadata verification failed.",
+                    fg=typer.colors.YELLOW,
+                )
+                continue
+
             tmp_dir = tempfile.mkdtemp(prefix="aegis_")
             dec_path = Path(tmp_dir) / "manifest.dec.yaml"
             try:
                 decrypt_directive(str(enc_path), str(private_key), str(dec_path))
                 model = parse_yaml_file_as(AutorunFile, str(dec_path))
+
+                # If the manifest says the USB provides a file, recompute file hash and re-verify signature binding
+                if model.autorun.provides_file and model.autorun.run.file:
+                    file_path = Path(mount_point) / model.autorun.run.file
+                    comp_hash = sha256_file(str(file_path)) if file_path.is_file() else None
+                    if not verify_metadata(str(enc_path), meta, str(public_key), comp_hash):
+                        raise ValueError("Signature binding to file hash failed.")
+
                 typer.secho(
                     f"Valid manifest found on {mount_point}; executing autorun...",
                     fg=typer.colors.GREEN,
                 )
-                autorun_runner.autorun(model, mount_point)
+                # Pass meta into autorun so it can enforce file hash
+                autorun_runner.autorun(model, mount_point, meta)
                 typer.secho(
                     f"Autorun completed for device at {mount_point}",
                     fg=typer.colors.GREEN,
