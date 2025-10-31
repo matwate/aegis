@@ -1,0 +1,9 @@
+autorun:
+  name: "Write Tmp File"
+  description: "Creates a file in /tmp to verify autorun without GUI"
+  provides_file: false
+  run:
+    file: null
+    interpreter: null
+    arguments: null
+    command: "bash -lc 'echo Aegis OK > /tmp/aegis_example.txt'"

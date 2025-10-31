@@ -1,0 +1,9 @@
+autorun:
+  name: "Aegis Headless Example"
+  description: "Safe default that writes to the system journal to confirm autorun works. Runs under sudo without GUI."
+  provides_file: false
+  run:
+    file: null
+    interpreter: null
+    arguments: null
+    command: "bash -lc 'logger -t aegis "Aegis Headless Example executed"'"

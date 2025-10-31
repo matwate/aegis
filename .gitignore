@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+
+# IDE/editor
+.vscode/
+.idea/
+*.swp
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Aegis sensitive keys and artifacts
+private_key.pem
+*.key
+*.pem
+!aegis_public_key.pem
+*.enc
+# Temporary encryption workspace
+/tmp/aegis_*/
+
+# Local manifests and outputs
+*.dec.yaml
+*.enc.yaml
+*.log
+
+# USB mount temp paths (if created by tests/tools)
+/mnt/usb_temp/

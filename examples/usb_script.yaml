@@ -1,0 +1,9 @@
+autorun:
+  name: "USB Script Example"
+  description: "Runs a shell script bundled on the USB drive"
+  provides_file: true
+  run:
+    file: "scripts/hello.sh"
+    interpreter: "/bin/bash"
+    arguments: ["--flag", "value"]
+    command: null
