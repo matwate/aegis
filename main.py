@@ -135,8 +135,6 @@ def check_For_encrypted_autoruns(device_node):
         else:
             print("No autorun files found.")
 
-        # Here we can do OUR actual autorun handling logic, with safety checks.
-
     finally:
         subprocess.run(["umount", mount_point], check=False)
         try:
